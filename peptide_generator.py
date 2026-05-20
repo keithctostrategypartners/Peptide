@@ -110,21 +110,38 @@ def _parse_month_block(rows, start_row, sheet_name, label_override=None):
     if not month_label:
         return None
 
-    # ---- week rows (up to 8 rows below start) ----
+    # ---- week rows (up to 10 rows below start) ----
     week_rows     = []
     last_week_row = start_row
-    for r in range(start_row + 1, start_row + 9):
+    for r in range(start_row + 1, start_row + 11):
         if r not in rows:
             continue
-        rd = rows[r]
-        wl = rd.get('A')
-        if wl and re.match(r'^(Week|week)', str(wl)):
-            label = str(wl)
-            if re.match(r'^(Week|week)$', label):
+        rd    = rows[r]
+        wl    = rd.get('A')
+        b_val = str(rd.get('B') or '').strip()
+        if not wl:
+            continue
+        wl_str = str(wl).strip()
+        # Skip column header rows (e.g. the row that says "Frequency of Injection")
+        if b_val == 'Frequency of Injection':
+            continue
+        # Standard match: col A starts with "Week"
+        is_dosing_row = bool(re.match(r'^(Week|week)', wl_str))
+        # Special case: non-standard labels like "1st Injection", "2nd 3-4 days"
+        # Detect by: col A has text, col B has a frequency value, col F is numeric
+        if not is_dosing_row and b_val and rd.get('F') is not None:
+            try:
+                float(str(rd.get('F')))
+                is_dosing_row = True
+            except (ValueError, TypeError):
+                pass
+        if is_dosing_row:
+            label = wl_str
+            if re.match(r'^(Week|week)$', label, re.I):
                 label = f'Week {len(week_rows) + 1}'
             week_rows.append({
                 'week':               label,
-                'frequency':          str(rd.get('B') or ''),
+                'frequency':          b_val,
                 'mcg':                str(rd.get('C') or ''),
                 'units_per_injection': clean_number(rd.get('D')),
                 'injections':         clean_number(rd.get('E')),
