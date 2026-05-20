@@ -19,13 +19,13 @@ from flask import (Flask, request, jsonify, send_file,
 from peptide_generator import read_workbook, generate_document, WORKBOOK_PATH, safe_filename
 
 SECRET_KEY     = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'peptide2026!')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'DC2442dc$$')
 
 _staff_env = os.environ.get('STAFF_USERS', '')
 try:
-    STAFF_USERS = json.loads(_staff_env) if _staff_env else {"staff": "peptide2026!"}
+    STAFF_USERS = json.loads(_staff_env) if _staff_env else {"info": "Unruh2442!"}
 except json.JSONDecodeError:
-    STAFF_USERS = {"staff": "peptide2026!"}
+    STAFF_USERS = {"info": "Unruh2442!"}
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
