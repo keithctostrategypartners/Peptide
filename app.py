@@ -637,3 +637,262 @@ if __name__ == '__main__':
     print("  Ctrl+C to stop")
     print("="*55)
     app.run(host='0.0.0.0', port=5000, debug=False)
+    const r = await fetch('/admin/upload', {method:'POST', body:form});
+    if (r.status === 401) { location = '/login'; return; }
+    const d = await r.json();
+    if (r.ok) {
+      setAdminStatus('success','✓ ' + d.message + ' Reloading list…');
+      document.getElementById('xlsxFile').value = '';
+      document.getElementById('fileInfo').textContent = 'No file chosen';
+      setTimeout(() => loadMedications(), 1200);
+    } else { setAdminStatus('error','Error: ' + d.error); }
+  } catch(e) { setAdminStatus('error','Upload failed.'); }
+}
+
+function setStatus(t,m){const e=document.getElementById('status');e.className=t;e.textContent=m;e.style.display='block';}
+function setAdminStatus(t,m){const e=document.getElementById('adminStatus');e.className=t;e.textContent=m;e.style.display='block';}
+loadMedications();
+</script></body></html>"""
+
+@app.route('/login', methods=['GET','POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        u = request.form.get('username','').strip()
+        p = request.form.get('password','')
+        if STAFF_USERS.get(u) == p:
+            session['logged_in'] = True
+            session['username']  = u
+            return redirect(request.args.get('next') or '/')
+        error = 'Incorrect username or password.'
+    return render_template_string(LOGIN_HTML, error=error)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+@app.route('/')
+@login_required
+def index():
+    return render_template_string(MAIN_HTML, username=session.get('username','staff'))
+
+@app.route('/api/medications')
+@login_required
+def api_medications():
+    try:
+        data = read_workbook(WORKBOOK_PATH)
+        return jsonify({
+            k: {'display_name': v['display_name'],
+                'months': [{'label': m['label']} for m in v['months']]}
+            for k, v in data.items()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/generate', methods=['POST'])
+@login_required
+def api_generate():
+    body        = request.get_json(force=True)
+    med_key     = body.get('medication','').strip()
+    month_label = body.get('month','').strip()
+    patient     = body.get('patient_name','').strip()
+    appt        = body.get('appointment','').strip()
+
+    if not med_key or not month_label:
+        return jsonify({'error': 'medication and month are required'}), 400
+
+    try:
+        data = read_workbook(WORKBOOK_PATH)
+    except Exception as e:
+        return jsonify({'error': f'Could not read Excel file: {e}'}), 500
+
+    if med_key not in data:
+        return jsonify({'error': f'Medication "{med_key}" not found'}), 404
+
+    med_data   = data[med_key]
+    month_data = next((m for m in med_data['months'] if m['label'] == month_label), None)
+    if not month_data:
+        return jsonify({'error': f'Month "{month_label}" not found'}), 404
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        generate_document(
+            med_data=med_data, month_data=month_data,
+            patient_name=patient, appointment=appt,
+            output_path=tmp_path,
+        )
+
+        filename = (
+            f"{safe_filename(patient or 'Patient')} - "
+            f"{safe_filename(med_data['display_name'])} - "
+            f"{safe_filename(month_data['label'])}.docx"
+        )
+        file_bytes = tmp_path.read_bytes()
+        tmp_path.unlink(missing_ok=True)
+
+        app.config.setdefault('_docs', {})[filename] = file_bytes
+        return jsonify({'filename': filename})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/<filename>')
+@login_required
+def download(filename):
+    data = app.config.get('_docs', {}).get(filename)
+    if not data:
+        return 'File not found or expired — please generate again.', 404
+    return send_file(
+        io.BytesIO(data),
+        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        as_attachment=True,
+        download_name=filename,
+    )
+
+@app.route('/api/generate-custom', methods=['POST'])
+@login_required
+def api_generate_custom():
+    body      = request.get_json(force=True)
+    med_key   = body.get('medication', '').strip()
+    frequency = body.get('frequency', '').strip()
+    patient   = body.get('patient_name', '').strip()
+    appt      = body.get('appointment', '').strip()
+    try:
+        units_per_inj = float(str(body.get('units_per_injection', 0)))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'units_per_injection must be a number'}), 400
+
+    if not med_key or not frequency or units_per_inj <= 0:
+        return jsonify({'error': 'medication, frequency, and units_per_injection are required'}), 400
+
+    freq_inj = {'Daily': 7, 'Every Other Day': 3, 'Weekly': 1}
+    inj_week = freq_inj.get(frequency, 7)
+
+    week_rows = []
+    for i in range(4):
+        inj = (4 if i % 2 == 0 else 3) if frequency == 'Every Other Day' else inj_week
+        u_needed = units_per_inj * inj
+        week_rows.append({
+            'week':                f'Week {i+1}',
+            'frequency':           frequency,
+            'mcg':                 '',
+            'units_per_injection': str(int(units_per_inj)) if units_per_inj == int(units_per_inj) else str(units_per_inj),
+            'injections':          str(inj),
+            'units_needed':        str(int(u_needed)) if u_needed == int(u_needed) else f'{u_needed:.2f}',
+        })
+
+    total_inj   = sum(int(w['injections']) for w in week_rows)
+    total_units = units_per_inj * total_inj
+    total_str   = str(int(total_units)) if total_units == int(total_units) else f'{total_units:.2f}'
+
+    try:
+        data = read_workbook(WORKBOOK_PATH)
+    except Exception as e:
+        return jsonify({'error': f'Could not read Excel file: {e}'}), 500
+
+    # Match by sheet key or display_name (supports free-form entry)
+    med_data = data.get(med_key)
+    if not med_data:
+        med_data = next((v for v in data.values()
+                         if v['display_name'].strip().lower() == med_key.strip().lower()), None)
+
+    default_supplies = {'Pen':'','Syringes':'','Pen Needles':'','Cartridges':'','Alcohol Prep Pads':'','Storage Case':''}
+
+    if med_data:
+        custom_block = next((m for m in med_data['months'] if m['label'] == 'Custom Protocol'), None)
+        supplies     = custom_block['supplies'] if custom_block else default_supplies
+    else:
+        # Completely free-form medication not in Excel — build a minimal med_data
+        med_data = {
+            'sheet_name':   med_key,
+            'display_name': med_key,
+            'months':       [],
+        }
+        supplies = default_supplies
+
+    month_data = {
+        'label':         'Custom Protocol',
+        'sheet_name':    med_key,
+        'weeks':         week_rows,
+        'frequency':     frequency,
+        'total_units':   total_str,
+        'patient_price': '',
+        'supplies':      supplies,
+        'is_custom':     True,
+    }
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        generate_document(
+            med_data=med_data, month_data=month_data,
+            patient_name=patient, appointment=appt,
+            output_path=tmp_path,
+        )
+
+        filename = (
+            f"{safe_filename(patient or 'Patient')} - "
+            f"{safe_filename(med_data['display_name'])} - "
+            f"Custom Protocol.docx"
+        )
+        file_bytes = tmp_path.read_bytes()
+        tmp_path.unlink(missing_ok=True)
+
+        app.config.setdefault('_docs', {})[filename] = file_bytes
+        return jsonify({'filename': filename})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/admin/upload', methods=['POST'])
+@login_required
+def admin_upload():
+    if request.form.get('password','') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Incorrect admin password'}), 403
+
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({'error': 'No file received'}), 400
+    if not file.filename.lower().endswith('.xlsx'):
+        return jsonify({'error': 'File must be a .xlsx Excel file'}), 400
+
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        tmp_path = tmp.name
+        file.save(tmp_path)
+
+    try:
+        import openpyxl
+        openpyxl.load_workbook(tmp_path, data_only=True)
+    except Exception as e:
+        os.unlink(tmp_path)
+        return jsonify({'error': f'Invalid Excel file: {e}'}), 400
+
+    if WORKBOOK_PATH.exists():
+        ts     = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup = WORKBOOK_PATH.with_name(f'BACKUP_{ts}_{WORKBOOK_PATH.name}')
+        shutil.copy2(str(WORKBOOK_PATH), str(backup))
+
+    shutil.move(tmp_path, str(WORKBOOK_PATH))
+    return jsonify({'message': 'Pricing file updated successfully.'})
+
+if __name__ == '__main__':
+    print("="*55)
+    print("  Peptide Take Home Generator")
+    print("  Open: http://localhost:5000")
+    print(f"  Admin password: {ADMIN_PASSWORD}")
+    print("  Ctrl+C to stop")
+    print("="*55)
+    app.run(host='0.0.0.0', port=5000, debug=False)
+e Home Generator")
+    print("  Open: http://localhost:5000")
+    print(f"  Admin password: {ADMIN_PASSWORD}")
+    print("  Ctrl+C to stop")
+    print("="*55)
+    app.run(host='0.0.0.0', port=5000, debug=False)
+")
+    print("="*55)
+    app.run(host='0.0.0.0', port=5000, debug=False)
